@@ -1,0 +1,10 @@
+[project]
+name = "claude-free"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+restaurant-call = "call_app:main"
