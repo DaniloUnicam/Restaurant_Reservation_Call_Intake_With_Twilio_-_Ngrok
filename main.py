@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -99,9 +101,72 @@ class ReservationRequest:
         return self.people is not None and self.day is not None and self.time is not None
 
 
-def parse_reservation(text: str, today: date | None = None) -> ReservationRequest:
-    """Parse free-form reservation text into a structured request."""
+def parse_reservation(
+    text: str,
+    today: date | None = None,
+    use_claude: bool | None = None,
+) -> ReservationRequest:
+    """Parse free-form text with Claude when configured, else use local rules."""
     today = today or date.today()
+    if should_use_claude(use_claude):
+        try:
+            return parse_reservation_with_claude(text, today)
+        except Exception:
+            if os.getenv("CLAUDE_FALLBACK_TO_REGEX", "true").lower() != "false":
+                return parse_reservation_locally(text, today)
+            raise
+
+    return parse_reservation_locally(text, today)
+
+
+def should_use_claude(use_claude: bool | None) -> bool:
+    """Decide whether the Anthropic Claude SDK should handle parsing."""
+    if use_claude is not None:
+        return use_claude
+    return bool(os.getenv("ANTHROPIC_API_KEY"))
+
+
+def parse_reservation_with_claude(text: str, today: date) -> ReservationRequest:
+    """Ask Claude to extract reservation fields as strict JSON."""
+    from anthropic import Anthropic
+
+    client = Anthropic()
+    model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
+    response = client.messages.create(
+        model=model,
+        max_tokens=300,
+        system=(
+            "Extract restaurant reservation details from English or Italian text. "
+            "Return only JSON with keys people, day, time. people must be an integer "
+            "or null, day must be an ISO date YYYY-MM-DD or null, and time must be "
+            "24-hour HH:MM or null. Resolve relative dates using the provided today date."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": f"today={today.isoformat()}\nreservation_text={text}",
+            }
+        ],
+    )
+    payload = json.loads(extract_text_response(response))
+    return ReservationRequest(
+        people=payload.get("people") if isinstance(payload.get("people"), int) else None,
+        day=payload.get("day") if isinstance(payload.get("day"), str) else None,
+        time=payload.get("time") if isinstance(payload.get("time"), str) else None,
+        original_text=text,
+    )
+
+
+def extract_text_response(response: object) -> str:
+    """Read the first text block from an Anthropic Messages API response."""
+    for block in getattr(response, "content", []):
+        if getattr(block, "type", None) == "text":
+            return str(getattr(block, "text", ""))
+    raise ValueError("Claude response did not contain a text block")
+
+
+def parse_reservation_locally(text: str, today: date) -> ReservationRequest:
+    """Parse free-form reservation text with deterministic local rules."""
     normalized = normalize_text(text)
 
     return ReservationRequest(

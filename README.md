@@ -2,13 +2,15 @@ Restaurant Reservation Call Intake
 ==================================
 
 A small Python project for collecting restaurant reservation details from text
-or phone calls. The app can parse a reservation request, ask for missing fields
-in the terminal, and expose Twilio webhooks for real phone-call intake.
+or phone calls. The app uses the Anthropic Claude SDK to extract structured
+reservation fields when `ANTHROPIC_API_KEY` is configured, then falls back to a
+deterministic local parser when Claude is unavailable.
 
 Features
 ========
 
-- Extracts reservation details from English and Italian text.
+- Extracts reservation details from English and Italian text with Claude.
+- Falls back to local parsing rules for offline use and tests.
 - Detects party size, reservation day/date, and reservation time.
 - Supports terminal-based intake for local testing.
 - Supports Twilio inbound calls with a DTMF menu.
@@ -45,6 +47,9 @@ TWILIO_AUTH_TOKEN=...
 TWILIO_FROM_NUMBER=+15551234567
 RESTAURANT_FORWARD_NUMBER=+390123456789
 PUBLIC_BASE_URL=https://your-public-tunnel.example
+ANTHROPIC_API_KEY=sk-ant-...
+CLAUDE_MODEL=claude-sonnet-4-5-20250929
+CLAUDE_FALLBACK_TO_REGEX=true
 HOST=127.0.0.1
 PORT=8000
 ```
@@ -56,6 +61,10 @@ Variable reference:
 - `TWILIO_FROM_NUMBER`: your Twilio phone number in E.164 format.
 - `RESTAURANT_FORWARD_NUMBER`: phone number that receives forwarded calls.
 - `PUBLIC_BASE_URL`: public HTTPS base URL that points to this local server.
+- `ANTHROPIC_API_KEY`: enables reservation parsing through the Claude SDK.
+- `CLAUDE_MODEL`: optional Claude model override.
+- `CLAUDE_FALLBACK_TO_REGEX`: set to `false` to fail instead of using local
+  parsing when the Claude request fails.
 - `HOST`: local bind host. Defaults to `127.0.0.1`.
 - `PORT`: local port. Defaults to `8000`.
 - `RESERVATIONS_FILE`: optional output path for parsed reservations.
@@ -63,6 +72,9 @@ Variable reference:
 
 Terminal Intake
 ===============
+
+When `ANTHROPIC_API_KEY` is present, terminal intake uses Claude to extract the
+reservation. Without it, the local parser handles supported examples.
 
 Run the parser in terminal mode:
 
@@ -120,6 +132,10 @@ When a customer calls the Twilio number:
 5. Completed transcription fragments are posted to `/transcription`.
 6. Recording metadata is posted to `/recording`.
 7. Dial completion status is posted to `/dial-status`.
+
+The transcription handler combines final transcript fragments and sends the text
+through `parse_reservation`. With `ANTHROPIC_API_KEY` set, that means Claude is
+used for the extraction step.
 
 If the caller does not press a key, the app automatically forwards the call
 after the menu timeout.
