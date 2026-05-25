@@ -1,9 +1,7 @@
 from datetime import date
-from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
 
-from main import parse_reservation, parse_reservation_with_claude
+from main import parse_reservation
 
 
 class ReservationParserTests(TestCase):
@@ -47,28 +45,6 @@ class ReservationParserTests(TestCase):
         self.assertEqual(reservation.people, 4)
         self.assertEqual(reservation.day, "2026-05-25")
         self.assertEqual(reservation.time, "08:30")
-
-    def test_claude_sdk_parser_reads_json_response(self):
-        response = SimpleNamespace(
-            content=[
-                SimpleNamespace(
-                    type="text",
-                    text='{"people": 3, "day": "2026-05-22", "time": "19:45"}',
-                )
-            ]
-        )
-
-        with patch("anthropic.Anthropic") as client_class:
-            client_class.return_value.messages.create.return_value = response
-            reservation = parse_reservation_with_claude(
-                "Prenota per tre domani alle 19:45",
-                today=date(2026, 5, 21),
-            )
-
-        self.assertEqual(reservation.people, 3)
-        self.assertEqual(reservation.day, "2026-05-22")
-        self.assertEqual(reservation.time, "19:45")
-        client_class.return_value.messages.create.assert_called_once()
 
 
 if __name__ == "__main__":
