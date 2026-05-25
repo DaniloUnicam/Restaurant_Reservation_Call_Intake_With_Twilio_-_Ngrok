@@ -86,6 +86,8 @@ MONTHS = {
 
 @dataclass(frozen=True)
 class ReservationRequest:
+    """Parsed reservation fields plus the original user text."""
+
     people: int | None
     day: str | None
     time: str | None
@@ -93,10 +95,12 @@ class ReservationRequest:
 
     @property
     def is_complete(self) -> bool:
+        """Return true when every required reservation field is present."""
         return self.people is not None and self.day is not None and self.time is not None
 
 
 def parse_reservation(text: str, today: date | None = None) -> ReservationRequest:
+    """Parse free-form reservation text into a structured request."""
     today = today or date.today()
     normalized = normalize_text(text)
 
@@ -109,6 +113,7 @@ def parse_reservation(text: str, today: date | None = None) -> ReservationReques
 
 
 def find_people(text: str) -> int | None:
+    """Find a party size expressed as digits or supported number words."""
     patterns = [
         r"\b(?:for|party of|table for|reservation for)\s+(\d{1,2}|[a-z]+)\b",
         r"\b(\d{1,2}|[a-z]+)\s+(?:people|persons|guests|diners)\b",
@@ -124,6 +129,7 @@ def find_people(text: str) -> int | None:
 
 
 def parse_number(value: str) -> int | None:
+    """Convert a positive digit string or known number word into an integer."""
     if value.isdigit():
         number = int(value)
         return number if number > 0 else None
@@ -131,6 +137,7 @@ def parse_number(value: str) -> int | None:
 
 
 def normalize_text(text: str) -> str:
+    """Lowercase text, remove accents, and collapse repeated whitespace."""
     text = text.lower().replace("è", "e")
     text = unicodedata.normalize("NFD", text)
     text = "".join(char for char in text if unicodedata.category(char) != "Mn")
@@ -138,6 +145,7 @@ def normalize_text(text: str) -> str:
 
 
 def find_day(text: str, today: date) -> str | None:
+    """Find a reservation day and return it as an ISO date string."""
     if "today" in text:
         return today.isoformat()
     if "tomorrow" in text or "domani" in text:
@@ -183,11 +191,13 @@ def find_day(text: str, today: date) -> str | None:
 
 
 def next_weekday(today: date, weekday: int) -> date:
+    """Return the next future date for the requested weekday."""
     days_ahead = (weekday - today.weekday()) % 7
     return today + timedelta(days=days_ahead or 7)
 
 
 def find_time(text: str) -> str | None:
+    """Find a reservation time and return it as HH:MM in 24-hour format."""
     text = text.replace(".", ":")
     match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text)
     if match:
@@ -216,6 +226,7 @@ def find_time(text: str) -> str | None:
 
 
 def prompt_for_missing(reservation: ReservationRequest) -> ReservationRequest:
+    """Ask for missing reservation fields in the terminal."""
     people = reservation.people
     day = reservation.day
     time = reservation.time
@@ -231,6 +242,7 @@ def prompt_for_missing(reservation: ReservationRequest) -> ReservationRequest:
 
 
 def main() -> None:
+    """Run the command-line reservation intake demo."""
     print("Restaurant reservation call intake")
     print("Type the caller's request, for example: 'A table for four tomorrow at 7:30 pm'.")
     transcript = input("> ")

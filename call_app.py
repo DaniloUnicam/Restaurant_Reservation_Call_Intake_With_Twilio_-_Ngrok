@@ -14,6 +14,7 @@ from main import ReservationRequest, parse_reservation
 
 
 def load_dotenv(path: str = ".env") -> None:
+    """Load local environment variables without overriding real env values."""
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -37,19 +38,23 @@ MAX_MENU_ATTEMPTS = 3
 
 
 def twiml(body: str) -> bytes:
+    """Wrap a TwiML body in a Response document encoded for HTTP."""
     return f'<?xml version="1.0" encoding="UTF-8"?><Response>{body}</Response>'.encode()
 
 
 def public_url(path: str) -> str:
+    """Build an absolute callback URL from PUBLIC_BASE_URL and a path."""
     base_url = os.environ["PUBLIC_BASE_URL"].rstrip("/")
     return f"{base_url}{path}"
 
 
 def normalize_phone_number(value: str) -> str:
+    """Remove whitespace from a phone number before passing it to Twilio."""
     return "".join(value.split())
 
 
 def reservation_to_dict(reservation: ReservationRequest) -> dict[str, object]:
+    """Convert a parsed reservation to the JSONL payload format."""
     return {
         "people": reservation.people,
         "day": reservation.day,
@@ -61,6 +66,7 @@ def reservation_to_dict(reservation: ReservationRequest) -> dict[str, object]:
 
 
 def save_reservation(reservation: ReservationRequest, extra: dict[str, object] | None = None) -> None:
+    """Append one parsed reservation to the configured reservations file."""
     payload = reservation_to_dict(reservation)
     if extra:
         payload.update(extra)
@@ -70,12 +76,14 @@ def save_reservation(reservation: ReservationRequest, extra: dict[str, object] |
 
 
 def append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    """Append one dictionary as a JSON line, creating parent folders first."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(payload) + "\n")
 
 
 def voice_twiml() -> bytes:
+    """Return TwiML for the outbound speech-based reservation test call."""
     prompt = (
         "Hello. This is an automated reservation intake call. "
         "Please say the number of people, the day, and the time for the table."
@@ -91,6 +99,7 @@ def voice_twiml() -> bytes:
 
 
 def dial_restaurant_twiml() -> str:
+    """Return TwiML that starts transcription and dials the restaurant."""
     forward_number = os.getenv("RESTAURANT_FORWARD_NUMBER")
     if not forward_number:
         return '<Say language="it-IT">Numero del ristorante non configurato. Arrivederci.</Say>'
@@ -117,6 +126,7 @@ def dial_restaurant_twiml() -> str:
 
 
 def incoming_twiml() -> bytes:
+    """Return the inbound caller menu TwiML for the Twilio phone number."""
     notice = (
         "La chiamata puo essere trascritta per gestire la prenotazione. "
         "Prema 1 per parlare con il ristorante."
@@ -132,6 +142,7 @@ def incoming_twiml() -> bytes:
 
 
 def incoming_choice_twiml(digit: str, attempts: int = 0) -> bytes:
+    """Handle the caller's DTMF menu choice and continue the voice flow."""
     if digit == "1":
         return twiml(
             '<Say language="it-IT">La metto in contatto con il ristorante.</Say>'
@@ -143,10 +154,10 @@ def incoming_choice_twiml(digit: str, attempts: int = 0) -> bytes:
         '<Say language="it-IT">Scelta non valida. Prema 1 per parlare con il ristorante.</Say>'
         f'<Redirect method="POST">/incoming?attempts={attempts + 1}</Redirect>'
     )
-    return twiml(body)
 
 
 def handle_transcription(form: dict[str, str]) -> None:
+    """Store final Twilio transcription fragments and save complete bookings."""
     event = form.get("TranscriptionEvent")
     call_sid = form.get("CallSid", "unknown")
 
@@ -186,6 +197,7 @@ def handle_transcription(form: dict[str, str]) -> None:
 
 
 def handle_recording(form: dict[str, str]) -> None:
+    """Store Twilio recording metadata for later review."""
     append_jsonl(
         TRANSCRIPTS_FILE,
         {
@@ -201,6 +213,7 @@ def handle_recording(form: dict[str, str]) -> None:
 
 
 def dial_status_twiml(form: dict[str, str]) -> bytes:
+    """Record the forwarded call outcome and return any final TwiML."""
     status = form.get("DialCallStatus", "unknown")
     append_jsonl(
         TRANSCRIPTS_FILE,
@@ -221,6 +234,7 @@ def dial_status_twiml(form: dict[str, str]) -> bytes:
 
 
 def reservation_twiml(speech_text: str) -> bytes:
+    """Confirm or retry an outbound speech reservation request."""
     reservation = parse_reservation(speech_text)
     save_reservation(reservation)
 
@@ -251,6 +265,7 @@ def reservation_twiml(speech_text: str) -> bytes:
 
 
 def make_outbound_call(target_number: str) -> dict[str, object]:
+    """Create an outbound Twilio call that uses the /voice webhook."""
     account_sid = os.environ["TWILIO_ACCOUNT_SID"]
     auth_token = os.environ["TWILIO_AUTH_TOKEN"]
     from_number = normalize_phone_number(os.environ["TWILIO_FROM_NUMBER"])
@@ -274,12 +289,16 @@ def make_outbound_call(target_number: str) -> dict[str, object]:
 
 
 def parse_form(body: bytes) -> dict[str, str]:
+    """Parse a Twilio form-encoded webhook body into a plain dictionary."""
     parsed = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
     return {key: values[0] for key, values in parsed.items()}
 
 
 class Handler(BaseHTTPRequestHandler):
+    """HTTP request handler for local status pages and Twilio webhooks."""
+
     def do_GET(self) -> None:
+        """Serve the local health page used during manual setup checks."""
         if self.path == "/":
             self.respond_text(
                 "Restaurant call app is running.\n"
@@ -290,6 +309,7 @@ class Handler(BaseHTTPRequestHandler):
         self.respond_text("Not found\n", status=404)
 
     def do_POST(self) -> None:
+        """Route Twilio webhook POST requests to the matching flow handler."""
         parsed_path = urllib.parse.urlparse(self.path)
         path = parsed_path.path
         query = urllib.parse.parse_qs(parsed_path.query)
@@ -319,6 +339,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond_text("Not found\n", status=404)
 
     def handle_call(self, form: dict[str, str]) -> None:
+        """Handle the local API endpoint that starts an outbound test call."""
         target = form.get("target_number") or os.getenv("RESTAURANT_PHONE_NUMBER")
         if not target:
             self.respond_json({"error": "Missing target_number or RESTAURANT_PHONE_NUMBER"}, 400)
@@ -336,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
         self.respond_json({"call_sid": result.get("sid"), "status": result.get("status")})
 
     def respond_xml(self, body: bytes, status: int = 200) -> None:
+        """Send a TwiML/XML response."""
         self.send_response(status)
         self.send_header("Content-Type", "text/xml")
         self.send_header("Content-Length", str(len(body)))
@@ -343,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def respond_json(self, value: dict[str, object], status: int = 200) -> None:
+        """Send a JSON response."""
         body = json.dumps(value).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -351,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def respond_text(self, value: str, status: int = 200) -> None:
+        """Send a plain text response."""
         body = value.encode()
         self.send_response(status)
         self.send_header("Content-Type", "text/plain")
@@ -360,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    """Start the local Twilio webhook server."""
     load_dotenv()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Listening on http://{HOST}:{PORT}")
