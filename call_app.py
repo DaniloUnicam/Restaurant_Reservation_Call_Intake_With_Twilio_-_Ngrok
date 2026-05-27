@@ -83,19 +83,25 @@ def reservation_to_dict(reservation: ReservationRequest) -> dict[str, object]:
 
 def save_reservation(reservation: ReservationRequest, extra: dict[str, object] | None = None) -> None:
     """Append one parsed reservation to the configured reservations file."""
-    payload = reservation_to_dict(reservation)
-    if extra:
-        payload.update(extra)
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with DATA_FILE.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(payload) + "\n")
+    try:
+        payload = reservation_to_dict(reservation)
+        if extra:
+            payload.update(extra)
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with DATA_FILE.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload) + "\n")
+    except OSError as error:
+        log(f"Failed to save reservation: {error}")
 
 
 def append_jsonl(path: Path, payload: dict[str, object]) -> None:
     """Append one dictionary as a JSON line, creating parent folders first."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(payload) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload) + "\n")
+    except OSError as error:
+        log(f"Failed to append JSONL {path.name}: {error}")
 
 
 def parse_reservation_smart(text: str) -> tuple[ReservationRequest, str, str | None]:
@@ -422,23 +428,27 @@ class Handler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path)
         path = parsed_path.path
 
-        if path == "/ping":
-            self.respond_text("pong\n")
-            return
-        if path == "/":
-            self.respond_text(
-                "Restaurant call app is running.\n"
-                "Configure your Twilio phone number voice webhook to POST /incoming.\n"
-                "Optional: POST /call with target_number=+15551234567 to start a test call.\n"
-            )
-            return
-        if path == "/incoming":
-            self.respond_xml(incoming_twiml())
-            return
-        if path == "/voice":
-            self.respond_xml(voice_twiml())
-            return
-        self.respond_text("Not found\n", status=404)
+        try:
+            if path == "/ping":
+                self.respond_text("pong\n")
+                return
+            if path == "/":
+                self.respond_text(
+                    "Restaurant call app is running.\n"
+                    "Configure your Twilio phone number voice webhook to POST /incoming.\n"
+                    "Optional: POST /call with target_number=+15551234567 to start a test call.\n"
+                )
+                return
+            if path == "/incoming":
+                self.respond_xml(incoming_twiml())
+                return
+            if path == "/voice":
+                self.respond_xml(voice_twiml())
+                return
+            self.respond_text("Not found\n", status=404)
+        except Exception as error:
+            log(f"Unhandled error in GET {path}: {traceback.format_exc()}")
+            self.respond_text("Internal server error\n", status=500)
 
     def do_POST(self) -> None:
         """Route Twilio webhook POST requests to the matching flow handler."""
@@ -451,35 +461,43 @@ class Handler(BaseHTTPRequestHandler):
         caller = form.get("From", form.get("Caller", ""))
         log(f"POST {path} from={caller} length={length}")
 
-        if path == "/call":
-            self.handle_call(form)
-        elif path == "/voice":
-            self.respond_xml(voice_twiml())
-        elif path == "/incoming":
-            self.respond_xml(incoming_twiml(form.get("From", "")))
-        elif path == "/incoming-choice":
-            attempts = int(query.get("attempts", ["0"])[0])
-            self.respond_xml(incoming_choice_twiml(form.get("Digits", ""), attempts))
-        elif path == "/transcription":
-            handle_transcription(form)
-            self.respond_xml(twiml(""))
-        elif path == "/recording":
-            handle_recording(form)
-            self.respond_xml(twiml(""))
-        elif path == "/dial-status":
-            self.respond_xml(dial_status_twiml(form))
-        elif path == "/reservation":
-            previous_text = query.get("context", [""])[0]
-            speech = form.get("SpeechResult") or form.get("Digits", "")
+        try:
+            if path == "/call":
+                self.handle_call(form)
+            elif path == "/voice":
+                self.respond_xml(voice_twiml())
+            elif path == "/incoming":
+                self.respond_xml(incoming_twiml(form.get("From", "")))
+            elif path == "/incoming-choice":
+                attempts = int(query.get("attempts", ["0"])[0])
+                self.respond_xml(incoming_choice_twiml(form.get("Digits", ""), attempts))
+            elif path == "/transcription":
+                handle_transcription(form)
+                self.respond_xml(twiml(""))
+            elif path == "/recording":
+                handle_recording(form)
+                self.respond_xml(twiml(""))
+            elif path == "/dial-status":
+                self.respond_xml(dial_status_twiml(form))
+            elif path == "/reservation":
+                previous_text = query.get("context", [""])[0]
+                self.respond_xml(
+                    reservation_twiml(
+                        form.get("SpeechResult", ""),
+                        previous_text,
+                        form.get("CallSid", ""),
+                    )
+                )
+            else:
+                self.respond_text("Not found\n", status=404)
+        except Exception as error:
+            log(f"Unhandled error in POST {path}: {traceback.format_exc()}")
             self.respond_xml(
-                reservation_twiml(
-                    speech,
-                    previous_text,
-                    form.get("CallSid", ""),
+                twiml(
+                    '<Say language="it-IT">Si e verificato un errore. La prego di richiamare. Arrivederci.</Say>'
+                    "<Hangup/>"
                 )
             )
-        else:
-            self.respond_text("Not found\n", status=404)
 
     def handle_call(self, form: dict[str, str]) -> None:
         """Handle the local API endpoint that starts an outbound test call."""
