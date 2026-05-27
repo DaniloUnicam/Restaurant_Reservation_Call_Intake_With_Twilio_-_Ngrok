@@ -18,7 +18,7 @@ class CallAppTests(TestCase):
     def test_voice_twiml_asks_for_reservation_details(self):
         xml = voice_twiml().decode()
 
-        self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('<Gather input="dtmf speech"', xml)
         self.assertIn('language="it-IT"', xml)
         self.assertIn('action="/reservation"', xml)
         self.assertIn("numero di persone", xml)
@@ -26,7 +26,7 @@ class CallAppTests(TestCase):
     def test_incoming_twiml_listens_in_italian(self):
         xml = incoming_twiml().decode()
 
-        self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('<Gather input="dtmf speech"', xml)
         self.assertIn('language="it-IT"', xml)
         self.assertIn('action="/reservation"', xml)
         self.assertNotIn("<Dial", xml)
@@ -34,13 +34,13 @@ class CallAppTests(TestCase):
     def test_incoming_choice_returns_to_voice_agent(self):
         xml = incoming_choice_twiml("1").decode()
 
-        self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('<Gather input="dtmf speech"', xml)
         self.assertNotIn("<Transcription", xml)
 
     def test_incoming_choice_invalid_returns_to_voice_agent(self):
         xml = incoming_choice_twiml("9").decode()
 
-        self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('<Gather input="dtmf speech"', xml)
         self.assertNotIn("<Redirect", xml)
 
     def test_reservation_twiml_confirms_complete_request(self):

@@ -16,3 +16,6 @@ wheels/
 debug.log
 transcripts.jsonl
 reservations.jsonl
+cloudflared.log
+server.out.log
+server.err.log

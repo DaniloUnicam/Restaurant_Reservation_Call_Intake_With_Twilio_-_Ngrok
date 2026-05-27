@@ -22,6 +22,11 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
+def log(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+
+
 def load_dotenv(path: str = ".env") -> None:
     """Load local environment variables without overriding real env values."""
     env_path = Path(path)
@@ -37,14 +42,14 @@ def load_dotenv(path: str = ".env") -> None:
 
 load_dotenv()
 
-HOST = os.getenv("HOST", "127.0.0.1")
+HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 DATA_FILE = Path(os.getenv("RESERVATIONS_FILE", "reservations.jsonl"))
 TRANSCRIPTS_FILE = Path(os.getenv("TRANSCRIPTS_FILE", "transcripts.jsonl"))
 CALL_TRANSCRIPTS: dict[str, list[dict[str, str]]] = {}
 SAVED_CALLS: set[str] = set()
 MAX_MENU_ATTEMPTS = 3
-GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-3.0-flash")
 ENABLE_LIVE_TRANSCRIPTION = os.getenv("ENABLE_LIVE_TRANSCRIPTION", "").lower() in {"1", "true", "yes"}
 
 
@@ -194,8 +199,8 @@ def reservation_prompt_twiml(message: str | None = None, context: str = "") -> b
     if context:
         action += "?" + urllib.parse.urlencode({"context": context})
     gather = (
-        '<Gather input="speech" language="it-IT" speechTimeout="auto" timeout="12" '
-        f'action="{escape(action)}" method="POST">'
+        '<Gather input="dtmf speech" language="it-IT" speechTimeout="auto" timeout="15" '
+        f'finishOnKey="#" action="{escape(action)}" method="POST">'
         f'<Say language="it-IT">{escape(prompt)}</Say>'
         "</Gather>"
         '<Say language="it-IT">Non ho sentito la risposta. La prego di richiamare. Arrivederci.</Say>'
@@ -409,11 +414,17 @@ def parse_form(body: bytes) -> dict[str, str]:
 class Handler(BaseHTTPRequestHandler):
     """HTTP request handler for local status pages and Twilio webhooks."""
 
+    def log_message(self, format: str, *args: object) -> None:
+        log(f"{self.address_string()} - {format % args}")
+
     def do_GET(self) -> None:
         """Serve the local health page used during manual setup checks."""
         parsed_path = urllib.parse.urlparse(self.path)
         path = parsed_path.path
 
+        if path == "/ping":
+            self.respond_text("pong\n")
+            return
         if path == "/":
             self.respond_text(
                 "Restaurant call app is running.\n"
@@ -435,7 +446,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed_path.path
         query = urllib.parse.parse_qs(parsed_path.query)
         length = int(self.headers.get("Content-Length", "0"))
-        form = parse_form(self.rfile.read(length))
+        body = self.rfile.read(length)
+        form = parse_form(body)
+        caller = form.get("From", form.get("Caller", ""))
+        log(f"POST {path} from={caller} length={length}")
 
         if path == "/call":
             self.handle_call(form)
@@ -456,9 +470,10 @@ class Handler(BaseHTTPRequestHandler):
             self.respond_xml(dial_status_twiml(form))
         elif path == "/reservation":
             previous_text = query.get("context", [""])[0]
+            speech = form.get("SpeechResult") or form.get("Digits", "")
             self.respond_xml(
                 reservation_twiml(
-                    form.get("SpeechResult", ""),
+                    speech,
                     previous_text,
                     form.get("CallSid", ""),
                 )
@@ -486,38 +501,56 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond_xml(self, body: bytes, status: int = 200) -> None:
         """Send a TwiML/XML response."""
-        self.send_response(status)
-        self.send_header("Content-Type", "text/xml")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            log(f"Client disconnected before response complete (XML, {status})")
 
     def respond_json(self, value: dict[str, object], status: int = 200) -> None:
         """Send a JSON response."""
         body = json.dumps(value).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            log(f"Client disconnected before response complete (JSON, {status})")
 
     def respond_text(self, value: str, status: int = 200) -> None:
         """Send a plain text response."""
         body = value.encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            log(f"Client disconnected before response complete (Text, {status})")
 
 
 def main() -> None:
     """Start the local Twilio webhook server."""
     load_dotenv()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Listening on http://{HOST}:{PORT}")
-    print("Set the Twilio phone number Voice webhook to PUBLIC_BASE_URL/incoming.")
-    server.serve_forever()
+    server.socket.settimeout(None)  # block forever on accept
+    server.timeout = 0.5  # check for shutdown every 500ms
+    log(f"Listening on http://{HOST}:{PORT}")
+    log("Set the Twilio phone number Voice webhook to PUBLIC_BASE_URL/incoming.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log("Shutting down...")
+        server.server_close()
 
 
 if __name__ == "__main__":
