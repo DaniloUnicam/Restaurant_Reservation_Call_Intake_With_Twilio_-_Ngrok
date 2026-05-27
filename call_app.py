@@ -22,11 +22,6 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
-def log(message: str) -> None:
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
-
-
 def load_dotenv(path: str = ".env") -> None:
     """Load local environment variables without overriding real env values."""
     env_path = Path(path)
@@ -42,14 +37,14 @@ def load_dotenv(path: str = ".env") -> None:
 
 load_dotenv()
 
-HOST = os.getenv("HOST", "0.0.0.0")
+HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 DATA_FILE = Path(os.getenv("RESERVATIONS_FILE", "reservations.jsonl"))
 TRANSCRIPTS_FILE = Path(os.getenv("TRANSCRIPTS_FILE", "transcripts.jsonl"))
 CALL_TRANSCRIPTS: dict[str, list[dict[str, str]]] = {}
 SAVED_CALLS: set[str] = set()
 MAX_MENU_ATTEMPTS = 3
-GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-3.0-flash")
+GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
 ENABLE_LIVE_TRANSCRIPTION = os.getenv("ENABLE_LIVE_TRANSCRIPTION", "").lower() in {"1", "true", "yes"}
 
 
@@ -82,26 +77,80 @@ def reservation_to_dict(reservation: ReservationRequest) -> dict[str, object]:
 
 
 def save_reservation(reservation: ReservationRequest, extra: dict[str, object] | None = None) -> None:
-    """Append one parsed reservation to the configured reservations file."""
+    """Append one parsed reservation to local JSONL + Supabase (if configured)."""
+    payload = reservation_to_dict(reservation)
+    if extra:
+        payload.update(extra)
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with DATA_FILE.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload) + "\n")
+    save_reservation_to_supabase(payload)
+
+
+def save_reservation_to_supabase(payload: dict[str, object]) -> bool:
+    """Save a reservation to Supabase via REST API. Returns True on success."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not supabase_key:
+        return False
+    if supabase_url == "https://your-project.supabase.co":
+        return False
+
     try:
-        payload = reservation_to_dict(reservation)
-        if extra:
-            payload.update(extra)
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with DATA_FILE.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(payload) + "\n")
-    except OSError as error:
-        log(f"Failed to save reservation: {error}")
+        data = json.dumps(payload).encode()
+        url = f"{supabase_url.rstrip('/')}/rest/v1/reservations"
+        request = urllib.request.Request(url, data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", f"Bearer {supabase_key}")
+        request.add_header("apikey", supabase_key)
+        request.add_header("Prefer", "return=minimal")
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+        log(f"Reservation saved to Supabase: {payload.get('people')}p on {payload.get('day')}")
+        return True
+    except Exception as e:
+        log(f"Failed to save to Supabase: {e}")
+        return False
+
+
+def load_local_reservations() -> list[dict[str, object]]:
+    """Load all reservations from the local JSONL file."""
+    if not DATA_FILE.exists():
+        return []
+    results: list[dict[str, object]] = []
+    with DATA_FILE.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                results.append(json.loads(line))
+    results.reverse()
+    return results
+
+
+def get_reservations_from_supabase() -> list[dict[str, object]]:
+    """Fetch all reservations from Supabase via REST API."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not supabase_key or supabase_url == "https://your-project.supabase.co":
+        return []
+
+    try:
+        url = f"{supabase_url.rstrip('/')}/rest/v1/reservations?order=created_at.desc"
+        request = urllib.request.Request(url, method="GET")
+        request.add_header("Authorization", f"Bearer {supabase_key}")
+        request.add_header("apikey", supabase_key)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode())
+    except Exception as e:
+        log(f"Failed to fetch from Supabase: {e}")
+        return []
 
 
 def append_jsonl(path: Path, payload: dict[str, object]) -> None:
     """Append one dictionary as a JSON line, creating parent folders first."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(payload) + "\n")
-    except OSError as error:
-        log(f"Failed to append JSONL {path.name}: {error}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload) + "\n")
 
 
 def parse_reservation_smart(text: str) -> tuple[ReservationRequest, str, str | None]:
@@ -205,8 +254,8 @@ def reservation_prompt_twiml(message: str | None = None, context: str = "") -> b
     if context:
         action += "?" + urllib.parse.urlencode({"context": context})
     gather = (
-        '<Gather input="dtmf speech" language="it-IT" speechTimeout="auto" timeout="15" '
-        f'finishOnKey="#" action="{escape(action)}" method="POST">'
+        '<Gather input="speech" language="it-IT" speechTimeout="auto" timeout="12" '
+        f'action="{escape(action)}" method="POST">'
         f'<Say language="it-IT">{escape(prompt)}</Say>'
         "</Gather>"
         '<Say language="it-IT">Non ho sentito la risposta. La prego di richiamare. Arrivederci.</Say>'
@@ -420,35 +469,31 @@ def parse_form(body: bytes) -> dict[str, str]:
 class Handler(BaseHTTPRequestHandler):
     """HTTP request handler for local status pages and Twilio webhooks."""
 
-    def log_message(self, format: str, *args: object) -> None:
-        log(f"{self.address_string()} - {format % args}")
-
     def do_GET(self) -> None:
         """Serve the local health page used during manual setup checks."""
         parsed_path = urllib.parse.urlparse(self.path)
         path = parsed_path.path
 
-        try:
-            if path == "/ping":
-                self.respond_text("pong\n")
-                return
-            if path == "/":
-                self.respond_text(
-                    "Restaurant call app is running.\n"
-                    "Configure your Twilio phone number voice webhook to POST /incoming.\n"
-                    "Optional: POST /call with target_number=+15551234567 to start a test call.\n"
-                )
-                return
-            if path == "/incoming":
-                self.respond_xml(incoming_twiml())
-                return
-            if path == "/voice":
-                self.respond_xml(voice_twiml())
-                return
-            self.respond_text("Not found\n", status=404)
-        except Exception as error:
-            log(f"Unhandled error in GET {path}: {traceback.format_exc()}")
-            self.respond_text("Internal server error\n", status=500)
+        if path == "/":
+            self.respond_text(
+                "Restaurant call app is running.\n"
+                "Configure your Twilio phone number voice webhook to POST /incoming.\n"
+                "Optional: POST /call with target_number=+15551234567 to start a test call.\n"
+            )
+            return
+        if path == "/incoming":
+            self.respond_xml(incoming_twiml())
+            return
+        if path == "/voice":
+            self.respond_xml(voice_twiml())
+            return
+        if path == "/reservations":
+            reservations = get_reservations_from_supabase()
+            if not reservations:
+                reservations = load_local_reservations()
+            self.respond_json({"reservations": reservations})
+            return
+        self.respond_text("Not found\n", status=404)
 
     def do_POST(self) -> None:
         """Route Twilio webhook POST requests to the matching flow handler."""
@@ -456,48 +501,36 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed_path.path
         query = urllib.parse.parse_qs(parsed_path.query)
         length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
-        form = parse_form(body)
-        caller = form.get("From", form.get("Caller", ""))
-        log(f"POST {path} from={caller} length={length}")
+        form = parse_form(self.rfile.read(length))
 
-        try:
-            if path == "/call":
-                self.handle_call(form)
-            elif path == "/voice":
-                self.respond_xml(voice_twiml())
-            elif path == "/incoming":
-                self.respond_xml(incoming_twiml(form.get("From", "")))
-            elif path == "/incoming-choice":
-                attempts = int(query.get("attempts", ["0"])[0])
-                self.respond_xml(incoming_choice_twiml(form.get("Digits", ""), attempts))
-            elif path == "/transcription":
-                handle_transcription(form)
-                self.respond_xml(twiml(""))
-            elif path == "/recording":
-                handle_recording(form)
-                self.respond_xml(twiml(""))
-            elif path == "/dial-status":
-                self.respond_xml(dial_status_twiml(form))
-            elif path == "/reservation":
-                previous_text = query.get("context", [""])[0]
-                self.respond_xml(
-                    reservation_twiml(
-                        form.get("SpeechResult", ""),
-                        previous_text,
-                        form.get("CallSid", ""),
-                    )
-                )
-            else:
-                self.respond_text("Not found\n", status=404)
-        except Exception as error:
-            log(f"Unhandled error in POST {path}: {traceback.format_exc()}")
+        if path == "/call":
+            self.handle_call(form)
+        elif path == "/voice":
+            self.respond_xml(voice_twiml())
+        elif path == "/incoming":
+            self.respond_xml(incoming_twiml(form.get("From", "")))
+        elif path == "/incoming-choice":
+            attempts = int(query.get("attempts", ["0"])[0])
+            self.respond_xml(incoming_choice_twiml(form.get("Digits", ""), attempts))
+        elif path == "/transcription":
+            handle_transcription(form)
+            self.respond_xml(twiml(""))
+        elif path == "/recording":
+            handle_recording(form)
+            self.respond_xml(twiml(""))
+        elif path == "/dial-status":
+            self.respond_xml(dial_status_twiml(form))
+        elif path == "/reservation":
+            previous_text = query.get("context", [""])[0]
             self.respond_xml(
-                twiml(
-                    '<Say language="it-IT">Si e verificato un errore. La prego di richiamare. Arrivederci.</Say>'
-                    "<Hangup/>"
+                reservation_twiml(
+                    form.get("SpeechResult", ""),
+                    previous_text,
+                    form.get("CallSid", ""),
                 )
             )
+        else:
+            self.respond_text("Not found\n", status=404)
 
     def handle_call(self, form: dict[str, str]) -> None:
         """Handle the local API endpoint that starts an outbound test call."""
@@ -519,56 +552,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond_xml(self, body: bytes, status: int = 200) -> None:
         """Send a TwiML/XML response."""
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "text/xml")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log(f"Client disconnected before response complete (XML, {status})")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def respond_json(self, value: dict[str, object], status: int = 200) -> None:
         """Send a JSON response."""
         body = json.dumps(value).encode()
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log(f"Client disconnected before response complete (JSON, {status})")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def respond_text(self, value: str, status: int = 200) -> None:
         """Send a plain text response."""
         body = value.encode()
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log(f"Client disconnected before response complete (Text, {status})")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def main() -> None:
     """Start the local Twilio webhook server."""
     load_dotenv()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    server.socket.settimeout(None)  # block forever on accept
-    server.timeout = 0.5  # check for shutdown every 500ms
-    log(f"Listening on http://{HOST}:{PORT}")
-    log("Set the Twilio phone number Voice webhook to PUBLIC_BASE_URL/incoming.")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        log("Shutting down...")
-        server.server_close()
+    print(f"Listening on http://{HOST}:{PORT}")
+    print("Set the Twilio phone number Voice webhook to PUBLIC_BASE_URL/incoming.")
+    server.serve_forever()
 
 
 if __name__ == "__main__":
