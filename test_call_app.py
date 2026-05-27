@@ -4,9 +4,11 @@ from unittest.mock import patch
 
 import call_app
 from call_app import (
+    extract_json_object,
     handle_transcription,
     incoming_choice_twiml,
     incoming_twiml,
+    parse_reservation_smart,
     reservation_twiml,
     voice_twiml,
 )
@@ -17,54 +19,76 @@ class CallAppTests(TestCase):
         xml = voice_twiml().decode()
 
         self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('language="it-IT"', xml)
         self.assertIn('action="/reservation"', xml)
-        self.assertIn("number of people", xml)
+        self.assertIn("numero di persone", xml)
 
     def test_incoming_twiml_listens_in_italian(self):
-        with patch.dict(
-            call_app.os.environ,
-            {
-                "PUBLIC_BASE_URL": "https://example.test",
-                "RESTAURANT_FORWARD_NUMBER": "+390123456789",
-                "TWILIO_FROM_NUMBER": "+390987654321",
-            },
-        ):
-            xml = incoming_twiml().decode()
+        xml = incoming_twiml().decode()
 
-        self.assertIn("<Start>", xml)
-        self.assertIn("<Transcription", xml)
-        self.assertIn('languageCode="it-IT"', xml)
-        self.assertIn('<Gather input="dtmf"', xml)
-        self.assertIn('action="/incoming-choice"', xml)
-        self.assertIn("<Dial", xml)
-        self.assertIn("+390123456789", xml)
+        self.assertIn('<Gather input="speech"', xml)
+        self.assertIn('language="it-IT"', xml)
+        self.assertIn('action="/reservation"', xml)
+        self.assertNotIn("<Dial", xml)
 
-    def test_incoming_choice_one_dials_restaurant(self):
-        with patch.dict(
-            call_app.os.environ,
-            {
-                "PUBLIC_BASE_URL": "https://example.test",
-                "RESTAURANT_FORWARD_NUMBER": "+390123456789",
-            },
-        ):
-            xml = incoming_choice_twiml("1").decode()
+    def test_incoming_choice_returns_to_voice_agent(self):
+        xml = incoming_choice_twiml("1").decode()
 
-        self.assertIn("<Dial", xml)
-        self.assertIn("+390123456789", xml)
+        self.assertIn('<Gather input="speech"', xml)
+        self.assertNotIn("<Transcription", xml)
 
-    def test_incoming_choice_invalid_redirects_to_menu(self):
+    def test_incoming_choice_invalid_returns_to_voice_agent(self):
         xml = incoming_choice_twiml("9").decode()
 
-        self.assertIn("<Redirect", xml)
-        self.assertIn("/incoming?attempts=1", xml)
+        self.assertIn('<Gather input="speech"', xml)
+        self.assertNotIn("<Redirect", xml)
 
     def test_reservation_twiml_confirms_complete_request(self):
         with TemporaryDirectory() as directory:
             call_app.DATA_FILE = call_app.Path(directory) / "reservations.jsonl"
+            call_app.TRANSCRIPTS_FILE = call_app.Path(directory) / "transcripts.jsonl"
             xml = reservation_twiml("A table for four tomorrow at 7:30 pm").decode()
 
         self.assertIn("ho salvato un tavolo per 4 persone", xml)
         self.assertIn("<Hangup/>", xml)
+
+    def test_reservation_twiml_asks_for_missing_fields_with_context(self):
+        with TemporaryDirectory() as directory:
+            call_app.DATA_FILE = call_app.Path(directory) / "reservations.jsonl"
+            call_app.TRANSCRIPTS_FILE = call_app.Path(directory) / "transcripts.jsonl"
+            xml = reservation_twiml("Siamo in quattro", call_sid="CA123").decode()
+
+            self.assertFalse(call_app.DATA_FILE.exists())
+
+        self.assertIn("Mi manca giorno, orario", xml)
+        self.assertIn("context=Siamo+in+quattro", xml)
+        self.assertIn('action="/reservation?', xml)
+
+    def test_smart_parser_uses_genai_when_available(self):
+        llm_reservation = call_app.ReservationRequest(5, "2026-05-30", "21:00", "raw")
+        with patch.object(call_app, "parse_reservation_with_genai", return_value=(llm_reservation, None)):
+            reservation, parser, error = parse_reservation_smart("prenota sabato sera per cinque")
+
+        self.assertEqual(parser, "google_genai")
+        self.assertIsNone(error)
+        self.assertEqual(reservation.people, 5)
+        self.assertEqual(reservation.day, "2026-05-30")
+        self.assertEqual(reservation.time, "21:00")
+
+    def test_smart_parser_falls_back_to_local_parser(self):
+        with patch.object(call_app, "parse_reservation_with_genai", return_value=(None, "boom")):
+            reservation, parser, error = parse_reservation_smart("per 4 persone domani alle 20:30")
+
+        self.assertEqual(parser, "local")
+        self.assertEqual(error, "boom")
+        self.assertEqual(reservation.people, 4)
+        self.assertEqual(reservation.time, "20:30")
+
+    def test_extract_json_object_handles_markdown_fence(self):
+        self.assertEqual(
+            extract_json_object('```json\n{"people": 2, "day": null, "time": null}\n```'),
+            '{"people": 2, "day": null, "time": null}',
+        )
 
     def test_live_transcription_accumulates_and_saves_reservation(self):
         with TemporaryDirectory() as directory:

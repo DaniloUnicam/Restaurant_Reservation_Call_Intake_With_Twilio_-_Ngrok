@@ -3,14 +3,23 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import socket
+import sys
+import traceback
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 from main import ReservationRequest, parse_reservation
+
+
+def log(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -35,6 +44,8 @@ TRANSCRIPTS_FILE = Path(os.getenv("TRANSCRIPTS_FILE", "transcripts.jsonl"))
 CALL_TRANSCRIPTS: dict[str, list[dict[str, str]]] = {}
 SAVED_CALLS: set[str] = set()
 MAX_MENU_ATTEMPTS = 3
+GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+ENABLE_LIVE_TRANSCRIPTION = os.getenv("ENABLE_LIVE_TRANSCRIPTION", "").lower() in {"1", "true", "yes"}
 
 
 def twiml(body: str) -> bytes:
@@ -82,18 +93,112 @@ def append_jsonl(path: Path, payload: dict[str, object]) -> None:
         file.write(json.dumps(payload) + "\n")
 
 
+def parse_reservation_smart(text: str) -> tuple[ReservationRequest, str, str | None]:
+    """Use Gemini for flexible extraction, falling back to local parsing."""
+    local = parse_reservation(text)
+    llm_reservation, error = parse_reservation_with_genai(text)
+    if llm_reservation is None:
+        return local, "local", error
+
+    return (
+        ReservationRequest(
+            llm_reservation.people if llm_reservation.people is not None else local.people,
+            llm_reservation.day if llm_reservation.day is not None else local.day,
+            llm_reservation.time if llm_reservation.time is not None else local.time,
+            text,
+        ),
+        "google_genai",
+        None,
+    )
+
+
+def parse_reservation_with_genai(text: str) -> tuple[ReservationRequest | None, str | None]:
+    """Ask Google GenAI to extract reservation fields as JSON."""
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None, None
+
+    try:
+        from google import genai
+    except ImportError:
+        return None, "google-genai package is not installed"
+
+    prompt = (
+        "Estrai i dati di una prenotazione ristorante da questa trascrizione italiana.\n"
+        f"Data di oggi: {date.today().isoformat()}.\n"
+        "Rispondi solo con JSON valido con chiavi: people, day, time.\n"
+        "people deve essere un intero o null. day deve essere YYYY-MM-DD o null. "
+        "time deve essere HH:MM in formato 24 ore o null.\n"
+        f"Trascrizione: {text}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "people": {"type": ["integer", "null"]},
+            "day": {"type": ["string", "null"]},
+            "time": {"type": ["string", "null"]},
+        },
+        "required": ["people", "day", "time"],
+    }
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=GENAI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json", "response_json_schema": schema},
+        )
+        payload = json.loads(extract_json_object(response.text or "{}"))
+        return reservation_from_payload(payload, text), None
+    except Exception as error:
+        return None, str(error)
+
+
+def extract_json_object(text: str) -> str:
+    """Return the first JSON object from a model response."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped, flags=re.IGNORECASE)
+    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+    return match.group(0) if match else stripped
+
+
+def reservation_from_payload(payload: dict[str, object], original_text: str) -> ReservationRequest:
+    """Validate and normalize reservation JSON from GenAI."""
+    people = payload.get("people")
+    day = payload.get("day")
+    time_value = payload.get("time")
+
+    people = people if isinstance(people, int) and people > 0 else None
+    day = day if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else None
+    time_value = (
+        time_value
+        if isinstance(time_value, str) and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_value)
+        else None
+    )
+    return ReservationRequest(people, day, time_value, original_text)
+
+
 def voice_twiml() -> bytes:
     """Return TwiML for the outbound speech-based reservation test call."""
-    prompt = (
-        "Hello. This is an automated reservation intake call. "
-        "Please say the number of people, the day, and the time for the table."
+    return reservation_prompt_twiml()
+
+
+def reservation_prompt_twiml(message: str | None = None, context: str = "") -> bytes:
+    """Ask the caller for reservation details with speech recognition."""
+    prompt = message or (
+        "Salve, benvenuto. Per prenotare un tavolo dica il numero di persone, "
+        "il giorno e l'orario della prenotazione."
     )
+    action = "/reservation"
+    if context:
+        action += "?" + urllib.parse.urlencode({"context": context})
     gather = (
-        '<Gather input="speech" speechTimeout="auto" timeout="12" '
-        'action="/reservation" method="POST">'
-        f"<Say>{escape(prompt)}</Say>"
+        '<Gather input="speech" language="it-IT" speechTimeout="auto" timeout="12" '
+        f'action="{escape(action)}" method="POST">'
+        f'<Say language="it-IT">{escape(prompt)}</Say>'
         "</Gather>"
-        "<Say>I did not hear the reservation details. Goodbye.</Say>"
+        '<Say language="it-IT">Non ho sentito la risposta. La prego di richiamare. Arrivederci.</Say>'
     )
     return twiml(gather)
 
@@ -109,13 +214,16 @@ def dial_restaurant_twiml() -> str:
     recording_callback = escape(public_url("/recording"))
     caller_id = escape(normalize_phone_number(os.getenv("TWILIO_FROM_NUMBER", "")))
     caller_id_attr = f' callerId="{caller_id}"' if caller_id else ""
+    transcription = ""
+    if ENABLE_LIVE_TRANSCRIPTION:
+        transcription = (
+            "<Start>"
+            f'<Transcription statusCallbackUrl="{callback}" languageCode="it-IT" '
+            'track="both_tracks" partialResults="false" />'
+            "</Start>"
+        )
     return (
-        "<Start>"
-        f'<Transcription statusCallbackUrl="{callback}" languageCode="it-IT" '
-        'track="both_tracks" inboundTrackLabel="cliente" outboundTrackLabel="ristorante" '
-        'partialResults="false" hints="prenotazione,tavolo,persone,coperti,oggi,domani,'
-        'lunedi,martedi,mercoledi,giovedi,venerdi,sabato,domenica" />'
-        "</Start>"
+        transcription +
         f'<Dial answerOnBridge="true"{caller_id_attr} action="/dial-status" method="POST" '
         'record="record-from-answer-dual" '
         f'recordingStatusCallback="{recording_callback}" '
@@ -125,35 +233,14 @@ def dial_restaurant_twiml() -> str:
     )
 
 
-def incoming_twiml() -> bytes:
-    """Return the inbound caller menu TwiML for the Twilio phone number."""
-    notice = (
-        "La chiamata puo essere trascritta per gestire la prenotazione. "
-        "Prema 1 per parlare con il ristorante."
-    )
-    body = (
-        '<Gather input="dtmf" numDigits="1" timeout="8" action="/incoming-choice" method="POST">'
-        f'<Say language="it-IT">{escape(notice)}</Say>'
-        "</Gather>"
-        f'<Say language="it-IT">{escape("Nessuna scelta ricevuta. La metto in contatto con il ristorante.")}</Say>'
-        f"{dial_restaurant_twiml()}"
-    )
-    return twiml(body)
+def incoming_twiml(caller_number: str = "") -> bytes:
+    """Return the inbound voice-agent TwiML for the Twilio phone number."""
+    return reservation_prompt_twiml()
 
 
 def incoming_choice_twiml(digit: str, attempts: int = 0) -> bytes:
     """Handle the caller's DTMF menu choice and continue the voice flow."""
-    if digit == "1":
-        return twiml(
-            '<Say language="it-IT">La metto in contatto con il ristorante.</Say>'
-            f"{dial_restaurant_twiml()}"
-        )
-    if attempts >= MAX_MENU_ATTEMPTS:
-        return twiml('<Say language="it-IT">Scelta non valida. Arrivederci.</Say>')
-    return twiml(
-        '<Say language="it-IT">Scelta non valida. Prema 1 per parlare con il ristorante.</Say>'
-        f'<Redirect method="POST">/incoming?attempts={attempts + 1}</Redirect>'
-    )
+    return reservation_prompt_twiml()
 
 
 def handle_transcription(form: dict[str, str]) -> None:
@@ -183,7 +270,12 @@ def handle_transcription(form: dict[str, str]) -> None:
     append_jsonl(TRANSCRIPTS_FILE, {"call_sid": call_sid, **entry})
 
     combined_text = " ".join(item["text"] for item in CALL_TRANSCRIPTS[call_sid])
-    reservation = parse_reservation(combined_text)
+    reservation, parser, parser_error = parse_reservation_smart(combined_text)
+    if parser_error:
+        append_jsonl(
+            TRANSCRIPTS_FILE,
+            {"kind": "parser_error", "call_sid": call_sid, "parser": parser, "error": parser_error},
+        )
     if reservation.is_complete and call_sid not in SAVED_CALLS:
         save_reservation(
             reservation,
@@ -191,6 +283,7 @@ def handle_transcription(form: dict[str, str]) -> None:
                 "call_sid": call_sid,
                 "transcript": combined_text,
                 "source": "live_forwarded_call",
+                "parser": parser,
             },
         )
         SAVED_CALLS.add(call_sid)
@@ -233,12 +326,38 @@ def dial_status_twiml(form: dict[str, str]) -> bytes:
     )
 
 
-def reservation_twiml(speech_text: str) -> bytes:
+def reservation_twiml(
+    speech_text: str,
+    previous_text: str = "",
+    call_sid: str = "",
+    source: str = "voice_agent",
+) -> bytes:
     """Confirm or retry an outbound speech reservation request."""
-    reservation = parse_reservation(speech_text)
-    save_reservation(reservation)
+    combined_text = " ".join(part for part in (previous_text, speech_text) if part).strip()
+    reservation, parser, parser_error = parse_reservation_smart(combined_text)
+    append_jsonl(
+        TRANSCRIPTS_FILE,
+        {
+            "kind": "speech_attempt",
+            "call_sid": call_sid,
+            "text": speech_text,
+            "combined_text": combined_text,
+            "parser": parser,
+            "parser_error": parser_error,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
     if reservation.is_complete:
+        save_reservation(
+            reservation,
+            {
+                "call_sid": call_sid,
+                "transcript": combined_text,
+                "source": source,
+                "parser": parser,
+            },
+        )
         message = (
             f"Perfetto, ho salvato un tavolo per {reservation.people} persone "
             f"il {reservation.day} alle {reservation.time}. Arrivederci."
@@ -253,15 +372,8 @@ def reservation_twiml(speech_text: str) -> bytes:
     if reservation.time is None:
         missing.append("orario")
 
-    message = "Mi manca " + ", ".join(missing) + ". Puo ripetere la prenotazione?"
-    retry = (
-        '<Gather input="speech" language="it-IT" speechTimeout="auto" timeout="15" '
-        'action="/reservation" method="POST">'
-        f'<Say language="it-IT">{escape(message)}</Say>'
-        "</Gather>"
-        '<Say language="it-IT">Non riesco a completare la prenotazione. Arrivederci.</Say>'
-    )
-    return twiml(retry)
+    message = "Mi manca " + ", ".join(missing) + ". Puo dirmelo adesso?"
+    return reservation_prompt_twiml(message, combined_text)
 
 
 def make_outbound_call(target_number: str) -> dict[str, object]:
@@ -299,12 +411,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Serve the local health page used during manual setup checks."""
-        if self.path == "/":
+        parsed_path = urllib.parse.urlparse(self.path)
+        path = parsed_path.path
+
+        if path == "/":
             self.respond_text(
                 "Restaurant call app is running.\n"
                 "Configure your Twilio phone number voice webhook to POST /incoming.\n"
                 "Optional: POST /call with target_number=+15551234567 to start a test call.\n"
             )
+            return
+        if path == "/incoming":
+            self.respond_xml(incoming_twiml())
+            return
+        if path == "/voice":
+            self.respond_xml(voice_twiml())
             return
         self.respond_text("Not found\n", status=404)
 
@@ -321,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/voice":
             self.respond_xml(voice_twiml())
         elif path == "/incoming":
-            self.respond_xml(incoming_twiml())
+            self.respond_xml(incoming_twiml(form.get("From", "")))
         elif path == "/incoming-choice":
             attempts = int(query.get("attempts", ["0"])[0])
             self.respond_xml(incoming_choice_twiml(form.get("Digits", ""), attempts))
@@ -334,7 +455,14 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/dial-status":
             self.respond_xml(dial_status_twiml(form))
         elif path == "/reservation":
-            self.respond_xml(reservation_twiml(form.get("SpeechResult", "")))
+            previous_text = query.get("context", [""])[0]
+            self.respond_xml(
+                reservation_twiml(
+                    form.get("SpeechResult", ""),
+                    previous_text,
+                    form.get("CallSid", ""),
+                )
+            )
         else:
             self.respond_text("Not found\n", status=404)
 

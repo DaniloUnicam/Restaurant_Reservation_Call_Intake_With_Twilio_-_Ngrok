@@ -12,11 +12,10 @@ Features
 - Works offline for parsing and tests.
 - Detects party size, reservation day/date, and reservation time.
 - Supports terminal-based intake for local testing.
-- Supports Twilio inbound calls with a DTMF menu.
-- Forwards callers to a configured restaurant number.
-- Starts Twilio live transcription and records call metadata.
+- Supports Twilio inbound calls with an Italian speech-based reservation agent.
+- Collects missing reservation fields with follow-up voice prompts.
 - Saves completed reservations to `reservations.jsonl`.
-- Saves transcription and recording events to `transcripts.jsonl`.
+- Saves speech attempts and transcript events to `transcripts.jsonl`.
 
 Project Structure
 =================
@@ -44,8 +43,8 @@ Create a `.env` file in the project root:
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_FROM_NUMBER=+15551234567
-RESTAURANT_FORWARD_NUMBER=+390123456789
 PUBLIC_BASE_URL=https://your-public-tunnel.example
+GEMINI_API_KEY=your-google-genai-key
 HOST=127.0.0.1
 PORT=8000
 ```
@@ -55,8 +54,10 @@ Variable reference:
 - `TWILIO_ACCOUNT_SID`: Twilio account SID used for outbound test calls.
 - `TWILIO_AUTH_TOKEN`: Twilio auth token used for outbound test calls.
 - `TWILIO_FROM_NUMBER`: your Twilio phone number in E.164 format.
-- `RESTAURANT_FORWARD_NUMBER`: phone number that receives forwarded calls.
 - `PUBLIC_BASE_URL`: public HTTPS base URL that points to this local server.
+- `GEMINI_API_KEY`: optional Google GenAI API key for flexible reservation
+  extraction. `GOOGLE_API_KEY` also works.
+- `GENAI_MODEL`: optional Gemini model name. Defaults to `gemini-2.5-flash`.
 - `HOST`: local bind host. Defaults to `127.0.0.1`.
 - `PORT`: local port. Defaults to `8000`.
 - `RESERVATIONS_FILE`: optional output path for parsed reservations.
@@ -115,18 +116,20 @@ Method: HTTP POST
 When a customer calls the Twilio number:
 
 1. Twilio requests `/incoming`.
-2. The app plays an Italian notice and asks the caller to press `1`.
-3. If the caller presses `1`, Twilio requests `/incoming-choice`.
-4. The app starts live transcription and dials `RESTAURANT_FORWARD_NUMBER`.
-5. Completed transcription fragments are posted to `/transcription`.
-6. Recording metadata is posted to `/recording`.
-7. Dial completion status is posted to `/dial-status`.
+2. The app asks in Italian for number of people, day, and time.
+3. Twilio posts the recognized speech to `/reservation`.
+4. The app extracts structured fields with Google GenAI when configured,
+   falling back to the local parser if the API key is missing or the model
+   fails.
+5. The app saves complete reservations to
+   `reservations.jsonl`.
+6. If one or more fields are missing, the app asks only for the missing details.
 
-The transcription handler combines final transcript fragments and sends the text
-through the local `parse_reservation` parser.
+Example saved reservation:
 
-If the caller does not press a key, the app automatically forwards the call
-after the menu timeout.
+```json
+{"people": 4, "day": "2026-05-27", "time": "20:30", "is_complete": true}
+```
 
 Outbound Test Call
 ==================
@@ -147,7 +150,7 @@ Data Files
 Runtime files are local and ignored by Git:
 
 - `reservations.jsonl`: saved reservation payloads.
-- `transcripts.jsonl`: raw transcription, recording, and dial status events.
+- `transcripts.jsonl`: speech attempts and raw transcription events.
 - `debug.log`: local debug output, if generated.
 
 Testing
@@ -170,8 +173,6 @@ If the Twilio call ends immediately after the first message, check these points:
 - The local server must be running with `uv run python call_app.py`.
 - The tunnel must be online and forwarding to `http://127.0.0.1:8000`.
 - `PUBLIC_BASE_URL` must match the active tunnel URL.
-- `RESTAURANT_FORWARD_NUMBER` must be set in E.164 format, for example
-  `+390123456789`.
 - If ngrok shows `ERR_NGROK_3200`, the endpoint is offline and Twilio cannot
   reach your app.
 

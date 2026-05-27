@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Restaurant reservation intake with Twilio and local parsing"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "google-genai>=1.0.0",
+]
 
 [project.scripts]
 restaurant-call = "call_app:main"
