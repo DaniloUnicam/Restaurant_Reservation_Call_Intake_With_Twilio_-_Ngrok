@@ -1,183 +1,209 @@
-Restaurant Reservation Call Intake
-==================================
+Restaurant Table Reserver
+=========================
 
-A small Python project for collecting restaurant reservation details from text
-or phone calls. The app uses deterministic local parsing rules, so it works
-without any AI SDK or external language-model API.
+Applicazione Python per raccogliere prenotazioni di un ristorante da testo o
+chiamate VoIP. Il sistema parla in italiano, estrae numero di persone, giorno e
+orario, salva le prenotazioni localmente e, se configurato, le sincronizza su
+Supabase. Il progetto puo essere eseguito in locale oppure pubblicato su
+Hostingguru.
 
-Features
-========
-
-- Extracts reservation details from English and Italian text.
-- Works offline for parsing and tests.
-- Detects party size, reservation day/date, and reservation time.
-- Supports terminal-based intake for local testing.
-- Supports Twilio inbound calls with an Italian speech-based reservation agent.
-- Collects missing reservation fields with follow-up voice prompts.
-- Saves completed reservations to `reservations.jsonl`.
-- Saves speech attempts and transcript events to `transcripts.jsonl`.
-
-Project Structure
-=================
-
-- `main.py`: core reservation parser and terminal intake flow.
-- `call_app.py`: HTTP webhook server for Twilio voice calls.
-- `test_main.py`: parser tests.
-- `test_call_app.py`: Twilio/TwiML and transcription tests.
-- `.env`: local configuration file. This file must not be committed.
-
-Requirements
+Funzionalita
 ============
 
-- Python 3.14 or newer, as declared in `pyproject.toml`.
-- `uv` for running the project commands.
-- A Twilio account with a voice-capable phone number.
-- A public HTTPS tunnel, such as ngrok or cloudflared, for local webhook testing.
+- Parsing di prenotazioni in italiano e inglese.
+- Assistente vocale in italiano per chiamate VoIP/Twilio.
+- Domande di follow-up se mancano persone, giorno o orario.
+- Estrazione avanzata con Google Gemini, con fallback al parser locale.
+- Salvataggio su `reservations.jsonl`.
+- Salvataggio opzionale su database Supabase via REST API.
+- Storico trascrizioni, tentativi vocali, registrazioni e stato chiamata in
+  `transcripts.jsonl`.
+- Endpoint `/reservations` per leggere le prenotazioni salvate.
+- Supporto a deploy pubblico su Hostingguru.
 
-Environment Variables
-=====================
+Struttura
+=========
 
-Create a `.env` file in the project root:
+- `call_app.py`: server HTTP e routing dei webhook VoIP/Twilio.
+- `app_config.py`: configurazione, lettura `.env` e costanti condivise.
+- `reservation_parser.py`: parser deterministico locale.
+- `storage.py`: salvataggio JSONL e integrazione Supabase.
+- `reservation_ai.py`: estrazione prenotazione con Gemini e fallback locale.
+- `voice_flow.py`: TwiML, flusso vocale, trascrizioni e conferme.
+- `twilio_client.py`: avvio chiamate outbound tramite API Twilio.
+- `test_main.py`: test del parser.
+- `test_call_app.py`: test del flusso voce, TwiML e trascrizioni.
+- `.env`: configurazione locale, da non committare.
+
+Requisiti
+=========
+
+- Python 3.10 o superiore.
+- `uv` per installare ed eseguire il progetto.
+- Account Twilio o provider VoIP compatibile con webhook HTTP/TwiML.
+- Progetto Supabase con tabella `reservations`, se si vuole il salvataggio su
+  database.
+- Hostingguru, oppure un tunnel HTTPS come ngrok/cloudflared per test locali.
+
+Configurazione
+==============
+
+Creare un file `.env` nella root:
 
 ```env
+HOST=127.0.0.1
+PORT=8000
+PUBLIC_BASE_URL=https://tuo-dominio.it
+
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_FROM_NUMBER=+15551234567
-PUBLIC_BASE_URL=https://your-public-tunnel.example
-GEMINI_API_KEY=your-google-genai-key
-HOST=127.0.0.1
-PORT=8000
+
+GEMINI_API_KEY=...
+GENAI_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_KEY=...
+
+RESERVATIONS_FILE=reservations.jsonl
+TRANSCRIPTS_FILE=transcripts.jsonl
+
+RESTAURANT_FORWARD_NUMBER=+390000000000
+ENABLE_LIVE_TRANSCRIPTION=false
 ```
 
-Variable reference:
+Variabili principali:
 
-- `TWILIO_ACCOUNT_SID`: Twilio account SID used for outbound test calls.
-- `TWILIO_AUTH_TOKEN`: Twilio auth token used for outbound test calls.
-- `TWILIO_FROM_NUMBER`: your Twilio phone number in E.164 format.
-- `PUBLIC_BASE_URL`: public HTTPS base URL that points to this local server.
-- `GEMINI_API_KEY`: optional Google GenAI API key for flexible reservation
-  extraction. `GOOGLE_API_KEY` also works.
-- `GENAI_MODEL`: optional Gemini model name. Defaults to `gemini-2.5-flash`.
-- `HOST`: local bind host. Defaults to `127.0.0.1`.
-- `PORT`: local port. Defaults to `8000`.
-- `RESERVATIONS_FILE`: optional output path for parsed reservations.
-- `TRANSCRIPTS_FILE`: optional output path for transcript events.
+- `PUBLIC_BASE_URL`: URL pubblico del server, ad esempio il dominio su
+  Hostingguru, senza slash finale.
+- `TWILIO_*`: credenziali e numero VoIP/Twilio usati per ricevere o avviare
+  chiamate.
+- `GEMINI_API_KEY`: chiave Google GenAI. Se manca, resta attivo il parser
+  locale.
+- `SUPABASE_URL`: URL del progetto Supabase.
+- `SUPABASE_SERVICE_KEY`: service key Supabase usata dal backend.
+- `RESTAURANT_FORWARD_NUMBER`: numero reale del ristorante per eventuale
+  inoltro chiamata.
+- `ENABLE_LIVE_TRANSCRIPTION`: abilita la trascrizione live delle chiamate
+  inoltrate quando supportata.
 
-Terminal Intake
-===============
+Database Supabase
+=================
 
-Run the parser in terminal mode:
+Il backend scrive nella tabella `reservations` tramite REST API. La tabella deve
+accettare almeno i campi generati dal payload:
 
-```powershell
-uv run python main.py
+```json
+{
+  "people": 4,
+  "day": "2026-05-27",
+  "time": "20:30",
+  "is_complete": true,
+  "original_text": "...",
+  "created_at": "...",
+  "call_sid": "...",
+  "transcript": "...",
+  "source": "voice_agent",
+  "parser": "google_genai"
+}
 ```
 
-Example input:
+Se Supabase non e configurato o non risponde, l'app continua a salvare in
+`reservations.jsonl`.
 
-```text
-I need a table for four tomorrow at 7:30 pm
-```
+Esecuzione Locale
+=================
 
-Example Italian input:
-
-```text
-Ciao, vorrei prenotare un tavolo per 4 persone alle 8:30 di lunedi 25 maggio
-```
-
-Twilio Inbound Call Flow
-========================
-
-Start the webhook server:
+Installare/eseguire con `uv`:
 
 ```powershell
 uv run python call_app.py
 ```
 
-Expose the local server through a public HTTPS tunnel. For ngrok:
-
-```powershell
-ngrok http 8000
-```
-
-Set `PUBLIC_BASE_URL` in `.env` to the HTTPS tunnel URL, without a trailing
-slash:
-
-```env
-PUBLIC_BASE_URL=https://your-ngrok-domain.ngrok-free.dev
-```
-
-In the Twilio Console, configure your Twilio phone number Voice webhook:
+Esempio:
 
 ```text
-URL:    https://your-ngrok-domain.ngrok-free.dev/incoming
-Method: HTTP POST
+Ciao, vorrei prenotare un tavolo per 4 persone alle 20:30 di lunedi 25 maggio
 ```
 
-When a customer calls the Twilio number:
+Flusso VoIP
+===========
 
-1. Twilio requests `/incoming`.
-2. The app asks in Italian for number of people, day, and time.
-3. Twilio posts the recognized speech to `/reservation`.
-4. The app extracts structured fields with Google GenAI when configured,
-   falling back to the local parser if the API key is missing or the model
-   fails.
-5. The app saves complete reservations to
-   `reservations.jsonl`.
-6. If one or more fields are missing, the app asks only for the missing details.
+Configurare il numero VoIP/Twilio in modo che il webhook voce punti a:
 
-Example saved reservation:
-
-```json
-{"people": 4, "day": "2026-05-27", "time": "20:30", "is_complete": true}
+```text
+POST https://tuo-dominio.it/incoming
 ```
 
-Outbound Test Call
-==================
+Flusso della chiamata:
 
-You can also ask Twilio to call a target number and collect reservation details
-with speech input:
+1. Il cliente chiama il numero VoIP.
+2. Il provider invia la chiamata a `/incoming`.
+3. L'app chiede in italiano numero di persone, giorno e orario.
+4. Il risultato vocale arriva a `/reservation`.
+5. L'app estrae i dati con Gemini o parser locale.
+6. Se la prenotazione e completa, viene salvata su JSONL e Supabase.
+7. Se manca qualcosa, l'app fa una nuova domanda solo sui dati mancanti.
+
+Endpoint utili
+==============
+
+- `GET /`: health check.
+- `POST /incoming`: webhook chiamate in ingresso.
+- `POST /reservation`: ricezione trascrizione vocale.
+- `POST /call`: avvia una chiamata outbound di test.
+- `GET /reservations`: lista prenotazioni, da Supabase se disponibile,
+  altrimenti dal file locale.
+- `POST /transcription`: callback trascrizione live.
+- `POST /recording`: callback registrazione.
+- `POST /dial-status`: esito inoltro chiamata.
+
+Hosting su Hostingguru
+======================
+
+Su Hostingguru pubblicare il progetto come applicazione Python esposta via HTTPS.
+Il comando di avvio deve eseguire:
 
 ```powershell
-curl -X POST http://127.0.0.1:8000/call -d "target_number=+15557654321"
+uv run python call_app.py
 ```
 
-The outbound call uses the `/voice` webhook and then posts speech recognition
-results to `/reservation`.
+Impostare nelle variabili ambiente del pannello Hostingguru gli stessi valori
+del file `.env`, in particolare:
 
-Data Files
-==========
+- `PUBLIC_BASE_URL` con il dominio pubblico Hostingguru.
+- credenziali `TWILIO_*`.
+- credenziali `SUPABASE_*`.
+- eventuale `GEMINI_API_KEY`.
 
-Runtime files are local and ignored by Git:
+Dopo il deploy, configurare il provider VoIP/Twilio con:
 
-- `reservations.jsonl`: saved reservation payloads.
-- `transcripts.jsonl`: speech attempts and raw transcription events.
-- `debug.log`: local debug output, if generated.
+```text
+https://tuo-dominio.it/incoming
+```
 
-Testing
-=======
+Chiamata outbound di test
+=========================
 
-Run the full test suite:
+```powershell
+curl -X POST https://tuo-dominio.it/call -d "target_number=+390000000000"
+```
+
+In locale:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/call -d "target_number=+390000000000"
+```
+
+Test
+====
 
 ```powershell
 uv run python -m unittest
 ```
 
-Troubleshooting
-===============
+Sicurezza
+=========
 
-If the Twilio call ends immediately after the first message, check these points:
-
-- The webhook URL in Twilio must be the current public tunnel URL plus
-  `/incoming`.
-- The Twilio webhook method must be `HTTP POST`.
-- The local server must be running with `uv run python call_app.py`.
-- The tunnel must be online and forwarding to `http://127.0.0.1:8000`.
-- `PUBLIC_BASE_URL` must match the active tunnel URL.
-- If ngrok shows `ERR_NGROK_3200`, the endpoint is offline and Twilio cannot
-  reach your app.
-
-Security Notes
-==============
-
-Never commit `.env`, Twilio credentials, transcripts, recordings, or local tool
-settings. The repository ignores these files by default.
+Non committare `.env`, credenziali Twilio, chiavi Supabase, trascrizioni,
+registrazioni o file di runtime. Usare la service key Supabase solo lato server.

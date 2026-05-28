@@ -1,7 +1,7 @@
 from datetime import date
 from unittest import TestCase, main
 
-from main import parse_reservation
+from reservation_parser import parse_reservation
 
 
 class ReservationParserTests(TestCase):

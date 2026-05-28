@@ -1,1 +1,4 @@
+# Runtime dependencies.
+# Twilio webhooks, Supabase REST calls, dotenv loading, and the HTTP server use
+# the Python standard library.
 google-genai>=1.0.0

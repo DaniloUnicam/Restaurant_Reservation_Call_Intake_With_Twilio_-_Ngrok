@@ -1,8 +1,11 @@
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-import call_app
+import reservation_ai
+import storage
+import voice_flow
 from call_app import (
     extract_json_object,
     handle_transcription,
@@ -12,6 +15,7 @@ from call_app import (
     reservation_twiml,
     voice_twiml,
 )
+from reservation_parser import ReservationRequest
 
 
 class CallAppTests(TestCase):
@@ -45,8 +49,8 @@ class CallAppTests(TestCase):
 
     def test_reservation_twiml_confirms_complete_request(self):
         with TemporaryDirectory() as directory:
-            call_app.DATA_FILE = call_app.Path(directory) / "reservations.jsonl"
-            call_app.TRANSCRIPTS_FILE = call_app.Path(directory) / "transcripts.jsonl"
+            storage.DATA_FILE = Path(directory) / "reservations.jsonl"
+            storage.TRANSCRIPTS_FILE = Path(directory) / "transcripts.jsonl"
             xml = reservation_twiml("A table for four tomorrow at 7:30 pm").decode()
 
         self.assertIn("ho salvato un tavolo per 4 persone", xml)
@@ -54,19 +58,19 @@ class CallAppTests(TestCase):
 
     def test_reservation_twiml_asks_for_missing_fields_with_context(self):
         with TemporaryDirectory() as directory:
-            call_app.DATA_FILE = call_app.Path(directory) / "reservations.jsonl"
-            call_app.TRANSCRIPTS_FILE = call_app.Path(directory) / "transcripts.jsonl"
+            storage.DATA_FILE = Path(directory) / "reservations.jsonl"
+            storage.TRANSCRIPTS_FILE = Path(directory) / "transcripts.jsonl"
             xml = reservation_twiml("Siamo in quattro", call_sid="CA123").decode()
 
-            self.assertFalse(call_app.DATA_FILE.exists())
+            self.assertFalse(storage.DATA_FILE.exists())
 
         self.assertIn("Mi manca giorno, orario", xml)
         self.assertIn("context=Siamo+in+quattro", xml)
         self.assertIn('action="/reservation?', xml)
 
     def test_smart_parser_uses_genai_when_available(self):
-        llm_reservation = call_app.ReservationRequest(5, "2026-05-30", "21:00", "raw")
-        with patch.object(call_app, "parse_reservation_with_genai", return_value=(llm_reservation, None)):
+        llm_reservation = ReservationRequest(5, "2026-05-30", "21:00", "raw")
+        with patch.object(reservation_ai, "parse_reservation_with_genai", return_value=(llm_reservation, None)):
             reservation, parser, error = parse_reservation_smart("prenota sabato sera per cinque")
 
         self.assertEqual(parser, "google_genai")
@@ -76,7 +80,7 @@ class CallAppTests(TestCase):
         self.assertEqual(reservation.time, "21:00")
 
     def test_smart_parser_falls_back_to_local_parser(self):
-        with patch.object(call_app, "parse_reservation_with_genai", return_value=(None, "boom")):
+        with patch.object(reservation_ai, "parse_reservation_with_genai", return_value=(None, "boom")):
             reservation, parser, error = parse_reservation_smart("per 4 persone domani alle 20:30")
 
         self.assertEqual(parser, "local")
@@ -92,10 +96,10 @@ class CallAppTests(TestCase):
 
     def test_live_transcription_accumulates_and_saves_reservation(self):
         with TemporaryDirectory() as directory:
-            call_app.DATA_FILE = call_app.Path(directory) / "reservations.jsonl"
-            call_app.TRANSCRIPTS_FILE = call_app.Path(directory) / "transcripts.jsonl"
-            call_app.CALL_TRANSCRIPTS.clear()
-            call_app.SAVED_CALLS.clear()
+            storage.DATA_FILE = Path(directory) / "reservations.jsonl"
+            storage.TRANSCRIPTS_FILE = Path(directory) / "transcripts.jsonl"
+            voice_flow.CALL_TRANSCRIPTS.clear()
+            voice_flow.SAVED_CALLS.clear()
 
             handle_transcription(
                 {
@@ -118,7 +122,7 @@ class CallAppTests(TestCase):
                 }
             )
 
-            saved = call_app.DATA_FILE.read_text(encoding="utf-8")
+            saved = storage.DATA_FILE.read_text(encoding="utf-8")
 
         self.assertIn('"people": 4', saved)
         self.assertIn('"time": "08:30"', saved)

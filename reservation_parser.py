@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 
 NUMBER_WORDS = {
@@ -223,38 +223,3 @@ def find_time(text: str) -> str | None:
             return f"{hour:02d}:{minute:02d}"
 
     return None
-
-
-def prompt_for_missing(reservation: ReservationRequest) -> ReservationRequest:
-    """Ask for missing reservation fields in the terminal."""
-    people = reservation.people
-    day = reservation.day
-    time = reservation.time
-
-    if people is None:
-        people = parse_number(input("How many people? ").strip().lower())
-    if day is None:
-        day = find_day(input("Which day? "), date.today())
-    if time is None:
-        time = find_time(input("What time? "))
-
-    return ReservationRequest(people, day, time, reservation.original_text)
-
-
-def main() -> None:
-    """Run the command-line reservation intake demo."""
-    print("Restaurant reservation call intake")
-    print("Type the caller's request, for example: 'A table for four tomorrow at 7:30 pm'.")
-    transcript = input("> ")
-
-    reservation = prompt_for_missing(parse_reservation(transcript))
-
-    print("\nReservation request")
-    print(f"People: {reservation.people or 'unknown'}")
-    print(f"Day:    {reservation.day or 'unknown'}")
-    print(f"Time:   {reservation.time or 'unknown'}")
-    print(f"Status: {'complete' if reservation.is_complete else 'needs follow-up'}")
-
-
-if __name__ == "__main__":
-    main()
